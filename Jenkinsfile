@@ -1,94 +1,82 @@
-def imageName ="jozefowiczadam/frontend"
-def dockerTag=""
+def imageName="jozefowiczadam/frontend"
 def dockerRegistry=""
 def registryCredentials="dockerhub"
+def dockerTag=""
 
-
-pipeline 
-{
-    agent 
-    {
+pipeline {
+    agent {
         label 'agent'
     }
- 
-    environment 
-    {
-        PIP_BREAK_SYSTEM_PACKAGES = 1
+
+    environment {
         scannerHome = tool 'SonarQube'
+        PIP_BREAK_SYSTEM_PACKAGES = 1
     }
- 
-    stages 
-    {
-        stage('Get_Code') 
-        {
-            steps 
-            {
-                checkout scm
+
+    stages {
+        stage('Get Code') {
+            steps {
+                checkout scm // Get some code from a GitHub repository
             }
         }
- 
-        stage('Unit_tests') 
-        {
-            steps 
-            {
+
+        stage('Unit tests') {
+            steps {
                 sh "pip3 install -r requirements.txt"
                 sh "python3 -m pytest --cov=. --cov-report xml:test-results/coverage.xml --junitxml=test-results/pytest-report.xml"
             }
         }
- 
-        stage('SonarQube') 
-        {
-            steps 
-            {
-                withSonarQubeEnv('SonarQube') 
-                {
+
+        stage('Sonarqube analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
                     sh "${scannerHome}/bin/sonar-scanner"
                 }
             }
-        } 
-        
-        stage('Build_Docker_Image') 
-        {
-            steps 
-            {
-                script 
-                {
-                   dockerTag = "RC-${env.BUILD_ID}"
-                   customImage = docker.build("$imageName:$dockerTag")
+        }
+
+        stage('Build application image') {
+            steps {
+                script {
+                  // Prepare basic image for application
+                  dockerTag = "RC-${env.BUILD_ID}.${env.GIT_COMMIT.take(7)}"
+                  applicationImage = docker.build("$imageName:$dockerTag",".")
                 }
             }
-        }   
-        
-        stage('Push_Image_Artifactory') 
-        {
-            steps 
-            {
-                script 
-                {
-                   docker.withRegistry("$dockerRegistry", "$registryCredentials")  
-                   {
-                     customImage.push()  
-                     customImage.push('lastest')
+        }
+
+        stage ('Pushing image to docker registry') {
+            steps {
+                script {
+                    docker.withRegistry("$dockerRegistry", "$registryCredentials") {
+                        applicationImage.push()
+                        applicationImage.push('latest')
                     }
                 }
             }
-        }   
-        
-        
+        }
+        stage ('Push to Repo') {
+            steps {
+                dir('ArgoCD') {
+                    withCredentials([gitUsernamePassword(credentialsId: 'git', gitToolName: 'Default')]) {
+                        git branch: 'main', url: 'https://github.com/Grahnkoul/ArgoCD'
+                        sh """ cd frontend
+                        sed -i "s#$imageName.*#$imageName:$dockerTag#g" deployment.yaml
+                        git commit -am "Set new $dockerTag tag."
+                        git push origin main
+                        """
+                    }
+                }
+            }
+        }
     }
-    
-    post 
-    {
-        always 
-		{
+    post {
+        always {
             junit testResults: "test-results/*.xml"
             cleanWs()
         }
-        success 
-        {
+        success {
             build job: 'app_of_apps', parameters: [ string(name: 'frontendDockerTag', value: "$dockerTag")], wait: false
         }
-    }    
-    
-
+    }
 }
